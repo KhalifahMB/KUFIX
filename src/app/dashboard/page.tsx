@@ -4,6 +4,8 @@ import SessionRecovery from '@/components/session-recovery';
 import { demoAccountById } from '@/lib/demo';
 import { loadDashboardData } from '@/lib/dashboard';
 import { getCommunityData, threadName } from '@/lib/community';
+import { getOrCreateWallet, walletTransactionsFor, activeEscrowsFor, pendingWithdrawalsFor } from '@/lib/wallet';
+import { loadProviderDocuments, loadPendingDocuments } from '@/lib/verification';
 import { DashboardShell, normalizeWorkspaceTab, type WorkspaceRole } from '@/components/dashboard-shell';
 import LiveDashboard from '@/components/live-dashboard';
 import DemoDashboard from '@/components/demo-dashboard';
@@ -30,6 +32,14 @@ export default async function Dashboard({ searchParams }: { searchParams: Promis
   const demo = demoAccountById(user.id);
   if (demo) return <DashboardShell role={role} name={user.name} email={user.email} tab={tab} demo><DashboardSession token={sessionToken}/><DemoDashboard key={`${demo.role}-${tab}`} role={demo.role} email={demo.email} initialTab={tab} notice={params.notice}/></DashboardShell>;
   const [data, community] = await Promise.all([loadDashboardData(user), getCommunityData(user.id, role)]);
+  const [walletData, walletTxs, escrows, pendingDocs, providerDocuments] = await Promise.all([
+    getOrCreateWallet(user.id),
+    walletTransactionsFor(user.id, 25),
+    activeEscrowsFor(role, user.id, data.provider?.id || null),
+    role === 'admin' ? loadPendingDocuments() : Promise.resolve([]),
+    data.provider ? loadProviderDocuments(data.provider.id) : Promise.resolve([]),
+  ]);
+  const adminWithdrawals = role === 'admin' ? await pendingWithdrawalsFor() : [];
   const threads = community.threads.map(thread => {
     const messages = community.messages.filter(m => m.threadId === thread.id);
     const last = messages[messages.length - 1];
@@ -43,5 +53,5 @@ export default async function Dashboard({ searchParams }: { searchParams: Promis
     const sender = community.users.find(u => u.id === message.senderId);
     return { id: message.id, body: message.body, senderId: message.senderId, sender: message.senderId === user.id ? 'You' : sender?.role === 'admin' ? 'KUFIX Customer Care' : sender?.name || 'Participant', createdAt: message.createdAt.toISOString() };
   }) : [];
-  return <DashboardShell role={role} name={user.name} email={user.email} tab={tab} demo={false}><DashboardSession token={sessionToken}/><LiveDashboard user={user} role={role} tab={tab} data={data} community={community} threads={threads} selectedThreadId={selectedThreadId} initialMessages={initialMessages} token={sessionToken} success={params.success} error={params.error}/></DashboardShell>;
+  return <DashboardShell role={role} name={user.name} email={user.email} tab={tab} demo={false}><DashboardSession token={sessionToken}/><LiveDashboard user={user} role={role} tab={tab} data={data} community={community} threads={threads} selectedThreadId={selectedThreadId} initialMessages={initialMessages} token={sessionToken} success={params.success} error={params.error} wallet={walletData} walletTxs={walletTxs} escrows={escrows} providerDocuments={providerDocuments} pendingDocuments={pendingDocs} adminWithdrawals={adminWithdrawals}/></DashboardShell>;
 }

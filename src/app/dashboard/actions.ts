@@ -1,13 +1,15 @@
 'use server';
 
 import { db } from '@/db';
-import { users, providers, bookings, quoteRequests, quotes, reviews, supportRequests, serviceCategories } from '@/db/schema';
+import { users, providers, bookings, quoteRequests, quotes, reviews, supportRequests, serviceCategories, walletTransactions, verificationDocuments } from '@/db/schema';
 import { and, eq } from 'drizzle-orm';
 import { redirect } from 'next/navigation';
 import { revalidatePath } from 'next/cache';
 import { checkPassword, hashPassword, requireFormUser } from '@/lib/auth';
 import { isDemoUser, demoAccountByEmail } from '@/lib/demo';
 import { getCategories } from '@/lib/marketplace';
+import { depositToWallet, createWithdrawalRequest, approveWithdrawal, rejectWithdrawal, releaseEscrow, formatNaira } from '@/lib/wallet';
+import { validateDocumentFile, storeDocument, latestLevelFor, DOCUMENT_TYPES } from '@/lib/verification';
 
 const val = (data: FormData, key: string) => String(data.get(key) || '').trim();
 const validId = (id: string) => /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id);
@@ -27,7 +29,8 @@ export async function saveProfileAction(data: FormData) {
   if (user.role === 'provider' && !categories.some(c => c.name === category) && existingProvider?.category !== category) done(data, 'settings', 'Please select a valid service category.', 'error');
   await db.update(users).set({ name, email, phone, location }).where(eq(users.id, user.id));
   if (user.role === 'provider') {
-    const profile = { name, location, category, area: val(data, 'area') || location, bio: val(data, 'bio'), experience: val(data, 'experience') || null, available: data.get('available') === 'on' };
+    const servicesOffered = data.getAll('servicesOffered').map(String).filter(c => c && c !== category).slice(0, 12);
+    const profile = { name, location, category, area: val(data, 'area') || location, bio: val(data, 'bio'), experience: val(data, 'experience') || null, available: data.get('available') === 'on', servicesOffered: servicesOffered.join(', ') };
     if (existingProvider) await db.update(providers).set(profile).where(eq(providers.userId, user.id));
     else await db.insert(providers).values({ ...profile, userId: user.id });
   }
@@ -131,4 +134,108 @@ export async function toggleCategoryAction(data: FormData) {
   if (!validId(id)) done(data, 'categories', 'Category not found.', 'error');
   await db.update(serviceCategories).set({ isActive: val(data, 'active') === 'true' }).where(eq(serviceCategories.id, id));
   refreshCatalogue(); done(data, 'categories', 'Service category status updated.');
+}
+
+export async function confirmDoneAction(data: FormData) {
+  const user = await requireFormUser(data, 'customer');
+  rejectDemo(user, data);
+  const id = val(data, 'id');
+  if (!validId(id)) done(data, 'bookings', 'Booking not found.', 'error');
+  const [booking] = await db.select().from(bookings).where(and(eq(bookings.id, id), eq(bookings.customerId, user.id))).limit(1);
+  if (!booking || booking.status !== 'Completed') done(data, 'bookings', 'This booking is not complete yet.', 'error');
+  if (!booking.providerConfirmed) done(data, 'bookings', 'Waiting for the provider to confirm the work is complete.', 'error');
+  if (booking.customerConfirmed) done(data, 'bookings', 'You have already confirmed this booking.');
+  await db.update(bookings).set({ customerConfirmed: true }).where(eq(bookings.id, id));
+  if (booking.paymentStatus === 'Held' && Number(booking.price) > 0) await releaseEscrow(id);
+  done(data, 'bookings', 'Job confirmed. Funds have been released to the provider.');
+}
+
+export async function depositWalletAction(data: FormData) {
+  const user = await requireFormUser(data);
+  rejectDemo(user, data);
+  const custom = val(data, 'customAmount');
+  const amount = custom ? Number(custom) : Number(val(data, 'amount'));
+  if (!amount || amount < 500 || amount > 10000000) done(data, 'wallet', 'Enter a deposit of at least ₦500.', 'error');
+  await depositToWallet(user.id, amount);
+  done(data, 'wallet', `Deposit of ${formatNaira(amount)} received (simulated).`);
+}
+
+export async function withdrawalAction(data: FormData) {
+  const user = await requireFormUser(data);
+  rejectDemo(user, data);
+  const amount = Number(val(data, 'amount'));
+  const bankName = val(data, 'bankName');
+  const accountNumber = val(data, 'accountNumber');
+  if (!amount || amount < 1000) done(data, 'wallet', 'Minimum withdrawal is ₦1,000.', 'error');
+  if (!bankName || !accountNumber) done(data, 'wallet', 'Enter your bank name and account number.', 'error');
+  const note = `Bank: ${bankName} · Acc: ${accountNumber}`;
+  const result = await createWithdrawalRequest(user.id, amount, note);
+  if (!result.ok) done(data, 'wallet', result.reason || 'Unable to request withdrawal.', 'error');
+  done(data, 'wallet', 'Withdrawal request submitted. It will be processed once approved.');
+}
+
+export async function approveWithdrawalAction(data: FormData) {
+  const user = await requireFormUser(data, 'admin');
+  rejectDemo(user, data);
+  const id = val(data, 'id');
+  if (!validId(id)) done(data, 'wallet', 'Withdrawal not found.', 'error');
+  const ok = await approveWithdrawal(id);
+  done(data, 'wallet', ok ? 'Withdrawal approved. Funds released.' : 'Withdrawal could not be approved.', ok ? 'success' : 'error');
+}
+
+export async function rejectWithdrawalAction(data: FormData) {
+  const user = await requireFormUser(data, 'admin');
+  rejectDemo(user, data);
+  const id = val(data, 'id');
+  if (!validId(id)) done(data, 'wallet', 'Withdrawal not found.', 'error');
+  const ok = await rejectWithdrawal(id);
+  done(data, 'wallet', ok ? 'Withdrawal rejected; funds restored.' : 'Withdrawal could not be rejected.', ok ? 'success' : 'error');
+}
+
+export async function uploadVerificationDocumentAction(data: FormData) {
+  const user = await requireFormUser(data, 'provider');
+  rejectDemo(user, data);
+  const [provider] = await db.select().from(providers).where(eq(providers.userId, user.id)).limit(1);
+  if (!provider) done(data, 'verification', 'Complete your provider profile first.', 'error');
+  const file = data.get('document');
+  const documentType = val(data, 'documentType');
+  if (!(file instanceof File) || file.size === 0) done(data, 'verification', 'Choose a document to upload.', 'error');
+  const sizeError = validateDocumentFile(file.name || '', file.size, file.type);
+  if (sizeError) done(data, 'verification', sizeError, 'error');
+  const buffer = Buffer.from(await file.arrayBuffer());
+  const row = await storeDocument(provider!.id, documentType, file.name || 'document', buffer, file.type || 'application/octet-stream');
+  done(data, 'verification', `Document captured (${DOCUMENT_TYPES.find(d => d.type === documentType)?.label || 'document'}). Waiting for admin review.`);
+}
+
+export async function approveVerificationDocumentAction(data: FormData) {
+  const user = await requireFormUser(data, 'admin');
+  rejectDemo(user, data);
+  const id = val(data, 'id');
+  if (!validId(id)) done(data, 'verification', 'Document not found.', 'error');
+  const [doc] = await db.select().from(verificationDocuments).where(eq(verificationDocuments.id, id)).limit(1);
+  if (!doc) done(data, 'verification', 'Document not found.', 'error');
+  await db.update(verificationDocuments).set({ status: 'approved', reviewedById: user.id, reviewedAt: new Date(), adminNote: val(data, 'note') || null }).where(eq(verificationDocuments.id, id));
+  const newLevel = await latestLevelFor(doc.providerId);
+  if (newLevel) await db.update(providers).set({ verification: newLevel }).where(eq(providers.id, doc.providerId));
+  revalidatePath('/professionals');
+  done(data, 'verification', 'Document approved and verification label updated.');
+}
+
+export async function rejectVerificationDocumentAction(data: FormData) {
+  const user = await requireFormUser(data, 'admin');
+  rejectDemo(user, data);
+  const id = val(data, 'id');
+  if (!validId(id)) done(data, 'verification', 'Document not found.', 'error');
+  await db.update(verificationDocuments).set({ status: 'rejected', reviewedById: user.id, reviewedAt: new Date(), adminNote: val(data, 'note') || null }).where(eq(verificationDocuments.id, id));
+  revalidatePath('/professionals');
+  done(data, 'verification', 'Document rejected.');
+}
+
+export async function requestMoreInfoVerificationAction(data: FormData) {
+  const user = await requireFormUser(data, 'admin');
+  rejectDemo(user, data);
+  const id = val(data, 'id');
+  if (!validId(id)) done(data, 'verification', 'Document not found.', 'error');
+  await db.update(verificationDocuments).set({ status: 'needs_info', reviewedById: user.id, reviewedAt: new Date(), adminNote: val(data, 'note') || 'Please provide additional information.' }).where(eq(verificationDocuments.id, id));
+  done(data, 'verification', 'Requested more information from the provider.');
 }

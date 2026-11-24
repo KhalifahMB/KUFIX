@@ -15,6 +15,7 @@ export async function POST(request: Request) {
   const role = val('role') === 'provider' ? 'provider' : 'customer';
   const fail = (message: string) => redirectTo(`/signup?role=${role}&error=${encodeURIComponent(message)}`);
   const name = val('name'), email = val('email').toLowerCase(), phone = val('phone'), location = val('location'), password = val('password'), category = val('category'), bio = val('bio');
+  const servicesOffered = data.getAll('servicesOffered').map(String).filter(c => c && c !== category).slice(0, 12);
   if (!name || name.length > 180 || !email.includes('@') || email.length > 255 || !phone || phone.length > 30 || !location || location.length > 180 || password.length < 8 || password.length > 512) return fail('Complete all fields and use a password of at least 8 characters.');
   if (demoAccountByEmail(email)) return fail('That address is reserved for a demo account.');
   const categories = await getCategories();
@@ -24,7 +25,7 @@ export async function POST(request: Request) {
   try {
     const user = await db.transaction(async tx => {
       const [created] = await tx.insert(users).values({ name, email, phone, location, role, passwordHash: hashPassword(password) }).returning();
-      if (role === 'provider') await tx.insert(providers).values({ userId: created.id, name, category, location, area: location, bio });
+      if (role === 'provider') await tx.insert(providers).values({ userId: created.id, name, category, location, area: location, bio, servicesOffered: servicesOffered.join(', ') });
       return created;
     });
     const token = await setSession(user.id);

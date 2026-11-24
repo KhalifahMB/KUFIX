@@ -6,6 +6,7 @@ import { and, eq, ne } from 'drizzle-orm';
 import { redirect } from 'next/navigation';
 import { revalidatePath } from 'next/cache';
 import { checkPassword, clearSession, getUser, hashPassword, requireFormUser, requireUser, setSession } from '@/lib/auth';
+import { getOrCreateWallet, holdBookingEscrow, releaseEscrow, refundEscrow, formatNaira } from '@/lib/wallet';
 import { getProvider } from '@/lib/marketplace';
 import { DEMO_PASSWORD, demoAccountByEmail, demoAccountByRole, isDemoUser } from '@/lib/demo';
 
@@ -58,9 +59,18 @@ export async function bookingAction(data: FormData) {
   const providerId = val(data, 'providerId'); const provider = await getProvider(providerId);
   if (!provider) error('/professionals', 'Provider not found.');
   const service = val(data, 'service'), description = val(data, 'description'), date = val(data, 'date'), time = val(data, 'time'), location = val(data, 'location');
+  const price = Number(val(data, 'price'));
   if (!service || !description || !date || !time || !location) error(`/professionals/${providerId}`, 'Please complete all booking fields.');
-  await db.insert(bookings).values({ customerId: user.id, providerId, service, description, date, time, location, instructions: val(data, 'instructions') });
-  revalidatePath('/dashboard'); redirect('/dashboard?success=Booking request submitted');
+  if (!price || price < 100 || price > 10000000) error(`/professionals/${providerId}`, 'Enter a service price of at least ₦100.');
+  const wallet = await getOrCreateWallet(user.id);
+  if (Number(wallet.balance) < price) error(`/professionals/${providerId}`, `Not enough wallet balance for ${formatNaira(price)}. Add funds to your wallet first.`);
+  const [created] = await db.insert(bookings).values({ customerId: user.id, providerId, service, description, date, time, location, instructions: val(data, 'instructions'), price: String(price) }).returning();
+  const hold = await holdBookingEscrow(created.id, user.id, price);
+  if (!hold.ok) {
+    await db.delete(bookings).where(eq(bookings.id, created.id));
+    error(`/professionals/${providerId}`, hold.reason || 'Unable to hold payment.');
+  }
+  revalidatePath('/dashboard'); redirect(dashPath(data, 'success=Booking%20request%20submitted.%20Payment%20held%20in%20escrow.'));
 }
 
 export async function quoteRequestAction(data: FormData) {
@@ -81,9 +91,19 @@ export async function bookingStatusAction(data: FormData) {
     const allowed: Record<string, string[]> = { Pending: ['Accepted', 'Rejected'], Accepted: ['In Progress'], 'In Progress': ['Completed'] };
     if (!provider || !allowed[booking.status]?.includes(status)) return;
   } else if (user.role === 'customer') {
-    if (booking.customerId !== user.id || !((status === 'Cancelled' && ['Pending', 'Accepted', 'Rescheduled'].includes(booking.status)) || (status === 'Accepted' && booking.status === 'Rescheduled'))) return;
+    if (booking.customerId !== user.id || !((status === 'Cancelled' && ['Pending', 'Accepted', 'Rescheduled', 'In Progress'].includes(booking.status)) || (status === 'Accepted' && booking.status === 'Rescheduled'))) return;
   } else if (user.role !== 'admin') return;
-  await db.update(bookings).set({ status }).where(eq(bookings.id, id)); revalidatePath('/dashboard');
+  if (status === 'Rejected' && booking.paymentStatus === 'Held') {
+    const refund = await refundEscrow(id);
+    if (!refund) return;
+  }
+  if (status === 'Cancelled' && booking.paymentStatus === 'Held' && user.role === 'customer') {
+    const refund = await refundEscrow(id);
+    if (!refund) return;
+  }
+  const updates: Record<string, unknown> = { status };
+  if (status === 'Completed') updates.providerConfirmed = true;
+  await db.update(bookings).set(updates).where(eq(bookings.id, id)); revalidatePath('/dashboard');
   redirect(dashPath(data, `tab=bookings&success=${encodeURIComponent(`Booking marked ${status.toLowerCase()}.`)}`));
 }
 
@@ -105,16 +125,27 @@ export async function acceptQuoteAction(data: FormData) {
   const [quote] = await db.select().from(quotes).where(eq(quotes.id, id)).limit(1); if (!quote) return;
   const [request] = await db.select().from(quoteRequests).where(and(eq(quoteRequests.id, quote.requestId), eq(quoteRequests.customerId, user.id))).limit(1);
   if (!request || request.status !== 'Open') return;
+  const amount = Number(quote.price);
+  const wallet = await getOrCreateWallet(user.id);
+  if (Number(wallet.balance) < amount) error('/dashboard', `Not enough wallet balance for ${formatNaira(amount)}. Add funds to your wallet first.`);
   const accepted = await db.transaction(async tx => {
     const changed = await tx.update(quoteRequests).set({ status: 'Accepted' }).where(and(eq(quoteRequests.id, request.id), eq(quoteRequests.status, 'Open'))).returning({ id: quoteRequests.id });
     if (!changed.length) return false;
     await tx.update(quotes).set({ status: 'Accepted' }).where(eq(quotes.id, id));
     await tx.update(quotes).set({ status: 'Rejected' }).where(and(eq(quotes.requestId, request.id), ne(quotes.id, id)));
-    await tx.insert(bookings).values({ customerId: user.id, providerId: quote.providerId, service: request.category, description: request.description, date: 'To be arranged', time: 'To be arranged', location: request.location, instructions: `Accepted quote: ₦${quote.price}. ${quote.details}`, status: 'Pending' });
-    return true;
+    const [booking] = await tx.insert(bookings).values({ customerId: user.id, providerId: quote.providerId, service: request.category, description: request.description, date: 'To be arranged', time: 'To be arranged', location: request.location, instructions: `Accepted quote: ₦${quote.price}. ${quote.details}`, status: 'Pending', price: String(amount) }).returning();
+    return { bookingId: booking.id };
   });
+  if (!accepted) return;
+  const hold = await holdBookingEscrow(accepted.bookingId, user.id, amount);
+  if (!hold.ok) {
+    await db.delete(bookings).where(eq(bookings.id, accepted.bookingId));
+    await db.update(quotes).set({ status: 'Submitted' }).where(eq(quotes.id, id));
+    await db.update(quoteRequests).set({ status: 'Open' }).where(eq(quoteRequests.id, request.id));
+    error('/dashboard', hold.reason || 'Unable to hold payment.');
+  }
   revalidatePath('/dashboard');
-  if (accepted) redirect('/dashboard?tab=bookings&success=Quote%20accepted.%20Your%20booking%20request%20is%20pending.');
+  redirect(dashPath(data, 'tab=bookings&success=Quote%20accepted.%20Payment%20held%20in%20escrow.'));
 }
 
 export async function reviewAction(data: FormData) {

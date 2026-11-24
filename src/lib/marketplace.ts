@@ -18,12 +18,12 @@ export async function getAllCategories() {
 export async function getCategories() { return (await getAllCategories()).filter(c => c.isActive); }
 
 const demos = [
-  { id: '11111111-1111-4111-8111-111111111111', name: 'Tunde Adebayo', category: 'Electrical', location: 'Wuse 2, Abuja', area: 'Wuse, Maitama, Garki', bio: 'Thoughtful electrical installations and repairs for homes and small businesses.', experience: '7 years experience', avatar: 'https://images.pexels.com/photos/7163464/pexels-photo-7163464.jpeg?auto=compress&cs=tinysrgb&fit=crop&w=400&h=400' },
-  { id: '22222222-2222-4222-8222-222222222222', name: 'Adaeze Okonkwo', category: 'Cleaning', location: 'Gwarinpa, Abuja', area: 'Gwarinpa, Jabi, Wuse', bio: 'Detail-focused home and office cleaning, from regular upkeep to deep cleans.', experience: '5 years experience', avatar: 'https://images.pexels.com/photos/37079379/pexels-photo-37079379.jpeg?auto=compress&cs=tinysrgb&fit=crop&w=400&h=400' },
-  { id: '33333333-3333-4333-8333-333333333333', name: 'Chinedu Eze', category: 'Plumbing', location: 'Jabi, Abuja', area: 'Jabi, Utako, Wuse', bio: 'Practical plumbing solutions for leaks, fittings, pumps and maintenance.', experience: '8 years experience', avatar: 'https://images.pexels.com/photos/37070438/pexels-photo-37070438.jpeg?auto=compress&cs=tinysrgb&fit=crop&w=400&h=400' },
-  { id: '44444444-4444-4444-8444-444444444444', name: 'Ibrahim Musa', category: 'AC & Refrigeration', location: 'Garki, Abuja', area: 'Garki, Asokoro, Wuse', bio: 'AC installation, routine servicing and cooling system troubleshooting.', experience: '6 years experience', avatar: 'https://images.pexels.com/photos/8044100/pexels-photo-8044100.jpeg?auto=compress&cs=tinysrgb&fit=crop&w=400&h=400' },
-  { id: '55555555-5555-4555-8555-555555555555', name: 'Emeka Nwosu', category: 'Generator & Inverter', location: 'Maitama, Abuja', area: 'Maitama, Wuse, Jabi', bio: 'Generator servicing and inverter support to keep your space powered.', experience: '9 years experience', avatar: 'https://images.pexels.com/photos/12311546/pexels-photo-12311546.jpeg?auto=compress&cs=tinysrgb&fit=crop&w=400&h=400' },
-  { id: '66666666-6666-4666-8666-666666666666', name: 'Bola Ajayi', category: 'Carpentry & Furniture', location: 'Lugbe, Abuja', area: 'Lugbe, Garki, Wuse', bio: 'Careful furniture repairs, assembly and custom woodwork for everyday spaces.', experience: '6 years experience', avatar: 'https://images.pexels.com/photos/31637720/pexels-photo-31637720.jpeg?auto=compress&cs=tinysrgb&fit=crop&w=400&h=400' },
+  { id: '11111111-1111-4111-8111-111111111111', name: 'Tunde Adebayo', category: 'Electrical', location: 'Wuse 2, Abuja', area: 'Wuse, Maitama, Garki', bio: 'Thoughtful electrical installations and repairs for homes and small businesses.', experience: '7 years experience', avatar: '/images/providers/7163464.jpg' },
+  { id: '22222222-2222-4222-8222-222222222222', name: 'Adaeze Okonkwo', category: 'Cleaning', location: 'Gwarinpa, Abuja', area: 'Gwarinpa, Jabi, Wuse', bio: 'Detail-focused home and office cleaning, from regular upkeep to deep cleans.', experience: '5 years experience', avatar: '/images/providers/37079379.jpg' },
+  { id: '33333333-3333-4333-8333-333333333333', name: 'Chinedu Eze', category: 'Plumbing', location: 'Jabi, Abuja', area: 'Jabi, Utako, Wuse', bio: 'Practical plumbing solutions for leaks, fittings, pumps and maintenance.', experience: '8 years experience', avatar: '/images/providers/37070438.jpg' },
+  { id: '44444444-4444-4444-8444-444444444444', name: 'Ibrahim Musa', category: 'AC & Refrigeration', location: 'Garki, Abuja', area: 'Garki, Asokoro, Wuse', bio: 'AC installation, routine servicing and cooling system troubleshooting.', experience: '6 years experience', avatar: '/images/providers/8044100.jpg' },
+  { id: '55555555-5555-4555-8555-555555555555', name: 'Emeka Nwosu', category: 'Generator & Inverter', location: 'Maitama, Abuja', area: 'Maitama, Wuse, Jabi', bio: 'Generator servicing and inverter support to keep your space powered.', experience: '9 years experience', avatar: '/images/providers/12311546.jpg' },
+  { id: '66666666-6666-4666-8666-666666666666', name: 'Bola Ajayi', category: 'Carpentry & Furniture', location: 'Lugbe, Abuja', area: 'Lugbe, Garki, Wuse', bio: 'Careful furniture repairs, assembly and custom woodwork for everyday spaces.', experience: '6 years experience', avatar: '/images/providers/31637720.jpg' },
 ];
 
 export async function getProviders() {
@@ -33,6 +33,17 @@ export async function getProviders() {
     return db.select().from(providers).orderBy(asc(providers.createdAt));
   }
   return existing;
+}
+
+export function offersCategory(p: { category: string; servicesOffered?: string | null }, category: string) {
+  if (!category) return true;
+  if (p.category === category) return true;
+  return (p.servicesOffered || '').split(',').map(c => c.trim()).filter(Boolean).includes(category);
+}
+
+export function servicesOfferedList(p: { category: string; servicesOffered?: string | null }) {
+  const extras = (p.servicesOffered || '').split(',').map(c => c.trim()).filter(Boolean).filter(c => c !== p.category);
+  return [p.category, ...extras];
 }
 
 export async function getProvider(id: string) {

@@ -35,6 +35,7 @@ export const providers = pgTable('providers', {
   avatar: text('avatar'),
   verification: varchar('verification', { length: 40 }).notNull().default('Not verified'),
   available: boolean('available').notNull().default(true),
+  servicesOffered: varchar('services_offered', { length: 255 }).notNull().default(''),
   isDemo: boolean('is_demo').notNull().default(false),
   createdAt: timestamp('created_at').notNull().defaultNow(),
 });
@@ -50,6 +51,11 @@ export const bookings = pgTable('bookings', {
   location: varchar('location', { length: 255 }).notNull(),
   instructions: text('instructions'),
   status: varchar('status', { length: 30 }).notNull().default('Pending'),
+  price: numeric('price', { precision: 12, scale: 2 }),
+  paymentStatus: varchar('payment_status', { length: 30 }).notNull().default('Unpaid'),
+  providerConfirmed: boolean('provider_confirmed').notNull().default(false),
+  customerConfirmed: boolean('customer_confirmed').notNull().default(false),
+  escrowHeldAt: timestamp('escrow_held_at'),
   createdAt: timestamp('created_at').notNull().defaultNow(),
 });
 
@@ -150,5 +156,40 @@ export const chatMessages = pgTable('chat_messages', {
   threadId: uuid('thread_id').notNull().references(() => chatThreads.id),
   senderId: uuid('sender_id').notNull().references(() => users.id),
   body: text('body').notNull(),
+  createdAt: timestamp('created_at').notNull().defaultNow(),
+});
+
+
+export const wallets = pgTable('wallets', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  userId: uuid('user_id').notNull().unique().references(() => users.id),
+  balance: numeric('balance', { precision: 12, scale: 2 }).notNull().default('0'),
+  currency: varchar('currency', { length: 8 }).notNull().default('NGN'),
+  updatedAt: timestamp('updated_at').notNull().defaultNow(),
+});
+
+export const walletTransactions = pgTable('wallet_transactions', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  userId: uuid('user_id').notNull().references(() => users.id),
+  type: varchar('type', { length: 30 }).notNull(), // deposit | escrow_hold | escrow_release | refund | withdrawal
+  amount: numeric('amount', { precision: 12, scale: 2 }).notNull(),
+  status: varchar('status', { length: 30 }).notNull().default('completed'), // completed | pending | approved | rejected
+  bookingId: uuid('booking_id').references(() => bookings.id),
+  note: varchar('note', { length: 255 }),
+  createdAt: timestamp('created_at').notNull().defaultNow(),
+});
+
+export const verificationDocuments = pgTable('verification_documents', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  providerId: uuid('provider_id').notNull().references(() => providers.id),
+  documentType: varchar('document_type', { length: 60 }).notNull(),
+  fileName: varchar('file_name', { length: 255 }).notNull(),
+  filePath: varchar('file_path', { length: 255 }).notNull(),
+  mimeType: varchar('mime_type', { length: 100 }).notNull(),
+  fileSize: integer('file_size').notNull(),
+  status: varchar('status', { length: 30 }).notNull().default('pending'), // pending | approved | rejected | needs_info
+  adminNote: text('admin_note'),
+  reviewedById: uuid('reviewed_by_id').references(() => users.id),
+  reviewedAt: timestamp('reviewed_at'),
   createdAt: timestamp('created_at').notNull().defaultNow(),
 });
